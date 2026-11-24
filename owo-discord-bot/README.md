@@ -53,6 +53,17 @@ Yeh ek complete Discord bot hai jo bilkul **OwO bot** ki tarah kaam karta hai au
 | `owo roulette <option> <bet>` | Roulette khelein (red/black/odd/even/0-36) | `owo roulette red 500` |
 | `owo slots <bet>` | Slot machine game khelein | `owo slots 100` |
 | `owo spin [bet]` | 🎡 **Spin & Win** — Jackpot 1,000,000 OwO! | `owo spin 5000` |
+| `owo store` | 🏬 **OwO Luxury Store** (interactive dropdown) | `owo store` |
+| `owo buy <item_id>` | Store se item khareedein | `owo buy crown` |
+| `owo inv` | Apni Inventory / Bag dekhein | `owo inv` |
+| `owo equip <item_id>` | Badge ya Title apne Profile par lagayein | `owo equip crown` |
+| `owo unequip <title/badge>` | Equipped Title ya Badge hatayein | `owo unequip title` |
+| `owo rps @user <bet>` | ⚔️ **1v1 Rock Paper Scissors Duel** (Private Buttons + Bet + ELO) | `owo rps @Friend 50000` |
+| `owo battle @user <bet>` | 🐉 **Duo Co-Op Dungeon Raid** vs Ancient Dragon | `owo battle @Friend 25000` |
+| `owo trio @p1 @p2 <bet>` | 🐉 **Trio Co-Op Dungeon Raid** vs 520 HP Elder Dragon (3 Players) | `owo trio @Friend1 @Friend2 30000` |
+| `owo squad [bet]` | 🛡️ **4-Player Squad Battle Royale** (Live Elimination Animation) | `owo squad 20000` |
+| `owo rank` | Apna Arena ELO Rating, Tier aur Winrate dekhein | `owo rank` |
+| `owo toprank` | Server ka **Competitive ELO Leaderboard** | `owo toprank` |
 | `owo level` | Current Level aur XP progress dekhein | `owo level` |
 | `owo give <@user> <amount>` | Kisi dost ko OwO Cash send karein | `owo give @user 1000` |
 | `owo top` | Richest players ka server leaderboard | `owo top` |
