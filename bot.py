@@ -50,6 +50,7 @@ def init_db():
             active_title TEXT DEFAULT NULL,
             active_badge TEXT DEFAULT NULL,
             active_weapon TEXT DEFAULT NULL,
+            active_armor TEXT DEFAULT NULL,
             elo INTEGER DEFAULT 1000,
             wins INTEGER DEFAULT 0,
             losses INTEGER DEFAULT 0
@@ -64,6 +65,8 @@ def init_db():
         cursor.execute("ALTER TABLE users ADD COLUMN active_badge TEXT DEFAULT NULL")
     if "active_weapon" not in cols:
         cursor.execute("ALTER TABLE users ADD COLUMN active_weapon TEXT DEFAULT NULL")
+    if "active_armor" not in cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN active_armor TEXT DEFAULT NULL")
     if "elo" not in cols:
         cursor.execute("ALTER TABLE users ADD COLUMN elo INTEGER DEFAULT 1000")
     if "wins" not in cols:
@@ -89,16 +92,16 @@ def init_db():
 def get_user(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT cash, xp, level, active_title, active_badge, active_weapon, elo, wins, losses FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT cash, xp, level, active_title, active_badge, active_weapon, active_armor, elo, wins, losses FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     if not row:
         # Initial cash: 1,000,000 (1 Million) cash, Elo: 1000
-        cursor.execute("INSERT INTO users (user_id, cash, xp, level, active_title, active_badge, active_weapon, elo, wins, losses) VALUES (?, 1000000, 0, 1, NULL, NULL, NULL, 1000, 0, 0)", (user_id,))
+        cursor.execute("INSERT INTO users (user_id, cash, xp, level, active_title, active_badge, active_weapon, active_armor, elo, wins, losses) VALUES (?, 1000000, 0, 1, NULL, NULL, NULL, NULL, 1000, 0, 0)", (user_id,))
         conn.commit()
         conn.close()
-        return {"cash": 1000000, "xp": 0, "level": 1, "active_title": None, "active_badge": None, "active_weapon": None, "elo": 1000, "wins": 0, "losses": 0, "auto_refilled": False}
+        return {"cash": 1000000, "xp": 0, "level": 1, "active_title": None, "active_badge": None, "active_weapon": None, "active_armor": None, "elo": 1000, "wins": 0, "losses": 0, "auto_refilled": False}
     
-    cash, xp, level, active_title, active_badge, active_weapon, elo, wins, losses = row
+    cash, xp, level, active_title, active_badge, active_weapon, active_armor, elo, wins, losses = row
     auto_refilled = False
     
     # Auto-refill rule: Agar cash 0 ya khatam ho jaye to automatic 1 Lakh (100,000) cash add ho jaye (unlimited feature)
@@ -116,6 +119,7 @@ def get_user(user_id):
         "active_title": active_title,
         "active_badge": active_badge,
         "active_weapon": active_weapon,
+        "active_armor": active_armor,
         "elo": elo if elo is not None else 1000,
         "wins": wins if wins is not None else 0,
         "losses": losses if losses is not None else 0,
@@ -1732,6 +1736,34 @@ STORE_ITEMS = {
         "bonus_dmg": 130,
         "description": "Legendary weapon: grants +130 DMG & ultimate dragon slaying power!"
     },
+    # Armors & Defense for Dragon Raids
+    "armor_iron": {
+        "id": "armor_iron",
+        "name": "Iron Plate Armor",
+        "type": "armor",
+        "icon": "🛡️",
+        "price": 250000,
+        "dmg_reduction": 15,
+        "description": "Reduces incoming Dragon boss damage by 15%!"
+    },
+    "armor_dragonscale": {
+        "id": "armor_dragonscale",
+        "name": "Dragonscale Bastion",
+        "type": "armor",
+        "icon": "🐉",
+        "price": 550000,
+        "dmg_reduction": 25,
+        "description": "Hardened dragon scales reduce boss damage by 25%!"
+    },
+    "armor_celestial": {
+        "id": "armor_celestial",
+        "name": "Celestial Aegis Armor",
+        "type": "armor",
+        "icon": "✨",
+        "price": 950000,
+        "dmg_reduction": 40,
+        "description": "Holy divine barrier reduces all Dragon boss damage by 40%!"
+    },
     # Collectibles / Flex
     "ring": {
         "id": "ring",
@@ -1809,6 +1841,8 @@ class StoreSelect(discord.ui.Select):
             cursor.execute("UPDATE users SET active_badge = ? WHERE user_id = ?", (f"{item['icon']} {item['name']}", interaction.user.id))
         elif item["type"] == "weapon" and not user_data.get("active_weapon"):
             cursor.execute("UPDATE users SET active_weapon = ? WHERE user_id = ?", (item_id, interaction.user.id))
+        elif item["type"] == "armor" and not user_data.get("active_armor"):
+            cursor.execute("UPDATE users SET active_armor = ? WHERE user_id = ?", (item_id, interaction.user.id))
 
         conn.commit()
         conn.close()
@@ -1849,6 +1883,7 @@ async def owo_store(ctx):
     badges_text = ""
     titles_text = ""
     weapons_text = ""
+    armors_text = ""
     collectibles_text = ""
 
     for k, v in STORE_ITEMS.items():
@@ -1859,10 +1894,13 @@ async def owo_store(ctx):
             titles_text += line
         elif v["type"] == "weapon":
             weapons_text += line
+        elif v["type"] == "armor":
+            armors_text += line
         else:
             collectibles_text += line
 
     embed.add_field(name="⚔️ Dragon Raid Weapons", value=weapons_text or "None", inline=False)
+    embed.add_field(name="🛡️ Dragon Raid Armor & Bastions", value=armors_text or "None", inline=False)
     embed.add_field(name="🔰 Profile Badges", value=badges_text or "None", inline=False)
     embed.add_field(name="👑 Custom Titles", value=titles_text or "None", inline=False)
     embed.add_field(name="💎 Luxury Collectibles", value=collectibles_text or "None", inline=False)
@@ -1906,6 +1944,8 @@ async def owo_buy(ctx, item_id: str = None):
         cursor.execute("UPDATE users SET active_badge = ? WHERE user_id = ?", (f"{item['icon']} {item['name']}", ctx.author.id))
     elif item["type"] == "weapon" and not user_data.get("active_weapon"):
         cursor.execute("UPDATE users SET active_weapon = ? WHERE user_id = ?", (item_id, ctx.author.id))
+    elif item["type"] == "armor" and not user_data.get("active_armor"):
+        cursor.execute("UPDATE users SET active_armor = ? WHERE user_id = ?", (item_id, ctx.author.id))
 
     conn.commit()
     conn.close()
@@ -1947,6 +1987,7 @@ async def owo_inventory(ctx, member: discord.Member = None):
     badges = []
     titles = []
     weapons = []
+    armors = []
     collectibles = []
 
     for item_id, name, itype, icon, pdate in rows:
@@ -1958,11 +1999,16 @@ async def owo_inventory(ctx, member: discord.Member = None):
         elif itype == "weapon":
             bonus = STORE_ITEMS.get(item_id, {}).get("bonus_dmg", 0)
             weapons.append(f"{icon} **{name}** (`{item_id}`) — *+{bonus} DMG*")
+        elif itype == "armor":
+            reduct = STORE_ITEMS.get(item_id, {}).get("dmg_reduction", 0)
+            armors.append(f"{icon} **{name}** (`{item_id}`) — *-{reduct}% DMG Taken*")
         else:
             collectibles.append(line)
 
     if weapons:
         embed.add_field(name="🗡️ Raid Weapons", value="\n".join(weapons), inline=False)
+    if armors:
+        embed.add_field(name="🛡️ Raid Armors", value="\n".join(armors), inline=False)
     if badges:
         embed.add_field(name="🔰 Badges", value="\n".join(badges), inline=False)
     if titles:
@@ -1976,13 +2022,20 @@ async def owo_inventory(ctx, member: discord.Member = None):
         if w_item:
             equipped_weapon_name = f"{w_item['icon']} {w_item['name']} (+{w_item.get('bonus_dmg', 0)} DMG)"
 
+    equipped_armor_name = "Default Clothes (0% Armor)"
+    if user_data.get("active_armor"):
+        a_item = STORE_ITEMS.get(user_data["active_armor"])
+        if a_item:
+            equipped_armor_name = f"{a_item['icon']} {a_item['name']} (-{a_item.get('dmg_reduction', 0)}% DMG Taken)"
+
     equipped_info = (
         f"🗡️ Weapon: **{equipped_weapon_name}**\n"
+        f"🛡️ Armor: **{equipped_armor_name}**\n"
         f"🏅 Title: **{user_data.get('active_title') or 'Default'}**\n"
         f"🔰 Badge: **{user_data.get('active_badge') or 'None'}**"
     )
     embed.add_field(name="✨ Currently Equipped", value=equipped_info, inline=False)
-    embed.set_footer(text="Equip karne ke liye: owo equip <item_id> | Unequip ke liye: owo unequip <weapon/title/badge>")
+    embed.set_footer(text="Equip: owo equip <item_id> | Unequip: owo unequip <weapon/armor/title/badge>")
     await ctx.send(embed=embed)
 
 @bot.command(name="equip", aliases=["use", "wear"])
@@ -2020,15 +2073,21 @@ async def owo_equip(ctx, item_id: str = None):
         conn.close()
         bonus = STORE_ITEMS.get(item_id, {}).get("bonus_dmg", 0)
         await ctx.send(f"🗡️ Aapne **{full_str}** (+{bonus} DMG) equip kar liya! Dragon raids mein aapka attack significantly boost hoga! 🔥")
+    elif itype == "armor":
+        cursor.execute("UPDATE users SET active_armor = ? WHERE user_id = ?", (item_id, ctx.author.id))
+        conn.commit()
+        conn.close()
+        reduct = STORE_ITEMS.get(item_id, {}).get("dmg_reduction", 0)
+        await ctx.send(f"🛡️ Aapne **{full_str}** (-{reduct}% DMG Reduction) equip kar liya! Dragon boss ka attack aapko kam damage dega! 🛡️")
     else:
         conn.close()
         await ctx.send(f"ℹ️ **{full_str}** ek collectible item hai, isse direct inventory (`owo inv`) mein flex kiya ja sakta hai!")
 
 @bot.command(name="unequip", aliases=["remove"])
 async def owo_unequip(ctx, target_type: str = None):
-    """Equipped weapon, title ya badge hatayein: owo unequip weapon / title / badge"""
-    if not target_type or target_type.lower() not in ["title", "badge", "weapon"]:
-        return await ctx.send("❓ **Usage:** `owo unequip weapon` / `owo unequip title` / `owo unequip badge`")
+    """Equipped weapon, armor, title ya badge hatayein: owo unequip weapon / armor / title / badge"""
+    if not target_type or target_type.lower() not in ["title", "badge", "weapon", "armor"]:
+        return await ctx.send("❓ **Usage:** `owo unequip weapon` / `owo unequip armor` / `owo unequip title` / `owo unequip badge`")
 
     target_type = target_type.lower()
     conn = sqlite3.connect(DB_PATH)
@@ -2044,6 +2103,11 @@ async def owo_unequip(ctx, target_type: str = None):
         conn.commit()
         conn.close()
         await ctx.send("✅ Weapon unequip kar diya gaya hai! Default dagger active ho gaya.")
+    elif target_type == "armor":
+        cursor.execute("UPDATE users SET active_armor = NULL WHERE user_id = ?", (ctx.author.id,))
+        conn.commit()
+        conn.close()
+        await ctx.send("✅ Armor unequip kar diya gaya hai! Default clothes active ho gaye.")
     else:
         cursor.execute("UPDATE users SET active_badge = NULL WHERE user_id = ?", (ctx.author.id,))
         conn.commit()
@@ -2291,16 +2355,40 @@ DRAGON_LEVELS = {
         "min_level": 5
     },
     5: {
-        "name": "Mythic Astral Cataclysm God",
-        "title": "Level 5: Astral Dragon God",
-        "emoji": "🌌",
-        "duo_hp": 900,
-        "trio_hp": 1350,
-        "base_min_dmg": 60,
+        "name": "Abyssal Void Leviathan",
+        "title": "Level 5: Void Leviathan",
+        "emoji": "🐙",
+        "duo_hp": 850,
+        "trio_hp": 1250,
+        "base_min_dmg": 55,
+        "base_max_dmg": 85,
+        "payout_mult": 3.4,
+        "xp": 220,
+        "min_level": 7
+    },
+    6: {
+        "name": "Celestial Sun-Eater Dragon",
+        "title": "Level 6: Sun-Eater",
+        "emoji": "☀️",
+        "duo_hp": 1100,
+        "trio_hp": 1600,
+        "base_min_dmg": 65,
         "base_max_dmg": 95,
-        "payout_mult": 3.8,
-        "xp": 250,
+        "payout_mult": 4.2,
+        "xp": 300,
         "min_level": 10
+    },
+    7: {
+        "name": "Mythic Astral Cataclysm God",
+        "title": "Level 7: Astral Dragon God",
+        "emoji": "🌌",
+        "duo_hp": 1500,
+        "trio_hp": 2200,
+        "base_min_dmg": 80,
+        "base_max_dmg": 120,
+        "payout_mult": 5.5,
+        "xp": 500,
+        "min_level": 15
     }
 }
 
@@ -2341,6 +2429,13 @@ class DungeonRaidView(discord.ui.View):
         w_id = user_data.get("active_weapon")
         if w_id and w_id in STORE_ITEMS:
             return STORE_ITEMS[w_id]
+        return None
+
+    def get_player_armor(self, user_id):
+        user_data = get_user(user_id)
+        a_id = user_data.get("active_armor")
+        if a_id and a_id in STORE_ITEMS:
+            return STORE_ITEMS[a_id]
         return None
 
     def get_battle_arena_art(self, animation_type=None, actor=None, target=None):
@@ -2429,9 +2524,15 @@ class DungeonRaidView(discord.ui.View):
         for i, p in enumerate(self.players):
             hp = self.player_hp.get(p.id, 0)
             w_item = self.get_player_weapon(p.id)
-            w_str = f" | {w_item['icon']} +{w_item.get('bonus_dmg',0)} DMG" if w_item else ""
+            a_item = self.get_player_armor(p.id)
+            gear_parts = []
+            if w_item:
+                gear_parts.append(f"{w_item['icon']}+{w_item.get('bonus_dmg',0)}")
+            if a_item:
+                gear_parts.append(f"{a_item['icon']}-{a_item.get('dmg_reduction',0)}%")
+            gear_str = f" | {' '.join(gear_parts)}" if gear_parts else ""
             embed.add_field(
-                name=f"{role_emojis[i % len(role_emojis)]} {p.display_name} (HP: {max(0, hp)}/100){w_str}",
+                name=f"{role_emojis[i % len(role_emojis)]} {p.display_name} (HP: {max(0, hp)}/100){gear_str}",
                 value=f"`[{self.make_hp_bar(hp, 100)}]`",
                 inline=True
             )
@@ -2569,10 +2670,21 @@ class DungeonRaidView(discord.ui.View):
             return
 
         boss_target = random.choice(alive_players)
-        boss_dmg = random.randint(self.dragon_info["base_min_dmg"], self.dragon_info["base_max_dmg"])
+        base_boss_dmg = random.randint(self.dragon_info["base_min_dmg"], self.dragon_info["base_max_dmg"])
+        
+        # Check target armor damage reduction
+        a_item = self.get_player_armor(boss_target.id)
+        if a_item and a_item.get("dmg_reduction"):
+            reduct_pct = a_item["dmg_reduction"]
+            boss_dmg = max(5, int(base_boss_dmg * (1 - reduct_pct / 100.0)))
+            armor_log = f" ({a_item['icon']} **{a_item['name']}** absorbed -{reduct_pct}% DMG!)"
+        else:
+            boss_dmg = base_boss_dmg
+            armor_log = ""
+
         self.player_hp[boss_target.id] = max(0, self.player_hp[boss_target.id] - boss_dmg)
 
-        self.log.append(f"🔥 **{self.dragon_info['name']}** roared INFERNO on **{boss_target.display_name}** for **{boss_dmg} DMG**!")
+        self.log.append(f"🔥 **{self.dragon_info['name']}** roared INFERNO on **{boss_target.display_name}** for **{boss_dmg} DMG**!{armor_log}")
 
         dragon_embed = self.get_embed(f"🔥 {self.dragon_info['name'].upper()} ATTACK!", anim_type="dragon_attack", target=boss_target)
         await self.msg.edit(embed=dragon_embed, view=self)
@@ -2616,10 +2728,10 @@ class DungeonRaidView(discord.ui.View):
 @bot.command(name="battle", aliases=["duo", "duobattle", "raid"])
 async def owo_duo_battle(ctx, partner: discord.Member = None, bet: str = "15000", level: int = 2):
     """2-Player Co-Op Duo Dungeon Raid vs Boss with difficulty level!
-    Usage: owo battle @partner [bet] [level: 1-5]"""
+    Usage: owo battle @partner [bet] [level: 1-7]"""
     if not partner:
         return await ctx.send(
-            "❓ **Usage:** `owo battle @partner [bet] [dragon_level 1-5]`\n"
+            "❓ **Usage:** `owo battle @partner [bet] [dragon_level 1-7]`\n"
             "Example: `owo battle @Friend 20000 3`\n"
             "💡 Dragon levels dekhne ke liye: `owo dragonlevels`"
         )
@@ -2633,7 +2745,7 @@ async def owo_duo_battle(ctx, partner: discord.Member = None, bet: str = "15000"
         return await ctx.send("❌ Galat bet amount! Kripya valid number, `all`, ya `half` daalein.")
 
     if level not in DRAGON_LEVELS:
-        return await ctx.send("❌ Dragon Level 1 se 5 ke beech chunein! Details: `owo dragonlevels`")
+        return await ctx.send("❌ Dragon Level 1 se 7 ke beech chunein! Details: `owo dragonlevels`")
 
     dragon_info = DRAGON_LEVELS[level]
     p1_data = get_user(ctx.author.id)
@@ -2659,10 +2771,10 @@ async def owo_duo_battle(ctx, partner: discord.Member = None, bet: str = "15000"
 @bot.command(name="trio", aliases=["triobattle", "trioraid"])
 async def owo_trio_battle(ctx, partner1: discord.Member = None, partner2: discord.Member = None, bet: str = "15000", level: int = 2):
     """3-Player Co-Op Trio Dungeon Raid vs Boss with difficulty level!
-    Usage: owo trio @partner1 @partner2 [bet] [level: 1-5]"""
+    Usage: owo trio @partner1 @partner2 [bet] [level: 1-7]"""
     if not partner1 or not partner2:
         return await ctx.send(
-            "❓ **Usage:** `owo trio @partner1 @partner2 [bet] [dragon_level 1-5]`\n"
+            "❓ **Usage:** `owo trio @partner1 @partner2 [bet] [dragon_level 1-7]`\n"
             "Example: `owo trio @Friend1 @Friend2 25000 3`\n"
             "💡 Dragon levels dekhne ke liye: `owo dragonlevels`"
         )
@@ -2679,7 +2791,7 @@ async def owo_trio_battle(ctx, partner1: discord.Member = None, partner2: discor
         return await ctx.send("❌ Galat bet amount! Kripya valid number, `all`, ya `half` daalein.")
 
     if level not in DRAGON_LEVELS:
-        return await ctx.send("❌ Dragon Level 1 se 5 ke beech chunein! Details: `owo dragonlevels`")
+        return await ctx.send("❌ Dragon Level 1 se 7 ke beech chunein! Details: `owo dragonlevels`")
 
     dragon_info = DRAGON_LEVELS[level]
     players = [ctx.author, partner1, partner2]
