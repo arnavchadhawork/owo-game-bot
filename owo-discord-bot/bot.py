@@ -385,13 +385,27 @@ class MinesView(discord.ui.View):
 @bot.event
 async def on_ready():
     init_db()
+    print(f"Logged in as {bot.user.name} ({bot.user.id})")
+    print(f"Connected to {len(bot.guilds)} server(s): {[g.name for g in bot.guilds]}")
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash commands.")
     except Exception as e:
         print(f"Failed to sync slash commands: {e}")
-    print(f"Logged in as {bot.user.name} ({bot.user.id})")
     print("OwO Discord Bot is Online and Ready!")
+
+@bot.event
+async def on_message(message):
+    # Don't respond to ourselves or other bots
+    if message.author.bot:
+        return
+    
+    # Debug print incoming message prefix check
+    content = message.content.strip()
+    if any(content.lower().startswith(p.lower()) for p in ["owo ", "!", "owo"]):
+        print(f"Received potential command from {message.author}: {content}")
+        
+    await bot.process_commands(message)
 
 # ----------------- COMMANDS -----------------
 
