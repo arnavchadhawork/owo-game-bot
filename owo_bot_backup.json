@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "updated_at": 1795705789,
+  "users": [
+    {
+      "user_id": 1363573918954160471,
+      "cash": 2022180,
+      "xp": 165,
+      "level": 2,
+      "active_title": null,
+      "active_badge": null,
+      "active_weapon": null,
+      "active_armor": null,
+      "elo": 1045,
+      "wins": 2,
+      "losses": 0
+    },
+    {
+      "user_id": 1392777222368002089,
+      "cash": 3000000,
+      "xp": 15,
+      "level": 1,
+      "active_title": null,
+      "active_badge": null,
+      "active_weapon": null,
+      "active_armor": null,
+      "elo": 1000,
+      "wins": 0,
+      "losses": 0
+    },
+    {
+      "user_id": 1394554096647802953,
+      "cash": 1290040,
+      "xp": 65,
+      "level": 1,
+      "active_title": null,
+      "active_badge": null,
+      "active_weapon": null,
+      "active_armor": null,
+      "elo": 1000,
+      "wins": 0,
+      "losses": 0
+    },
+    {
+      "user_id": 1396223466314928263,
+      "cash": 4149976,
+      "xp": 180,
+      "level": 6,
+      "active_title": null,
+      "active_badge": "\ud83d\udc8e VIP Badge",
+      "active_weapon": null,
+      "active_armor": null,
+      "elo": 1045,
+      "wins": 2,
+      "losses": 0
+    },
+    {
+      "user_id": 1527337466565234808,
+      "cash": 1475634,
+      "xp": 295,
+      "level": 3,
+      "active_title": null,
+      "active_badge": null,
+      "active_weapon": null,
+      "active_armor": null,
+      "elo": 1000,
+      "wins": 0,
+      "losses": 0
+    },
+    {
+      "user_id": 1553469779296264333,
+      "cash": 1172861,
+      "xp": 150,
+      "level": 2,
+      "active_title": null,
+      "active_badge": null,
+      "active_weapon": null,
+      "active_armor": null,
+      "elo": 1000,
+      "wins": 0,
+      "losses": 0
+    }
+  ],
+  "inventory": [
+    {
+      "user_id": 1396223466314928263,
+      "item_id": "vip",
+      "item_name": "VIP Badge",
+      "item_type": "badge",
+      "icon": "\ud83d\udc8e",
+      "purchased_at": "2026-11-23 09:00:57"
+    }
+  ]
+}
