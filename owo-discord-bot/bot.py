@@ -1,8 +1,16 @@
 import os
+import sys
+import json
+import time
+import base64
+import signal
+import atexit
 import random
 import sqlite3
 import math
 import threading
+import urllib.request
+import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 import discord
@@ -11,6 +19,10 @@ from discord.ext import commands
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+GITHUB_BACKUP_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("CLOUD_SYNC_TOKEN")
+GITHUB_BACKUP_REPO = os.getenv("GITHUB_BACKUP_REPO", "arnavchadhawork/owo-game-bot")
+GITHUB_BACKUP_BRANCH = os.getenv("GITHUB_BACKUP_BRANCH", "db-backup")
+GITHUB_BACKUP_FILE = "owo_bot_backup.json"
 
 # Dummy HTTP server for cloud hosts like Render Web Services (prevents port scan timeout)
 class SimpleHealthHandler(BaseHTTPRequestHandler):
@@ -38,9 +50,330 @@ if os.environ.get("PORT") or os.environ.get("RENDER"):
 import os as _os
 DB_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "owo_bot.db")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
+_cloud_sync_lock = threading.Lock()
+_timer_lock = threading.Lock()
+_sync_timer = None
+_db_dirty = False
+_cloud_restored = False
+_cached_gist_id = os.getenv("GITHUB_GIST_ID")
+_backup_mode = None  # "gist" or "repo"
+_last_cloud_sync_status = "Local SQLite Only (Set GITHUB_TOKEN on Render for cloud persistence)"
+
+def get_db_conn():
+    return sqlite3.connect(DB_PATH, timeout=15.0)
+
+def _github_api_request(url, method="GET", payload=None):
+    headers = {
+        "Authorization": f"token {GITHUB_BACKUP_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "OwO-Bot-Cloud-Persistence"
+    }
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        raw = resp.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+def _export_db_snapshot():
+    conn = get_db_conn()
     cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id, cash, xp, level, active_title, active_badge, active_weapon, active_armor, elo, wins, losses FROM users"
+    )
+    users = []
+    for row in cursor.fetchall():
+        users.append({
+            "user_id": row[0],
+            "cash": row[1],
+            "xp": row[2],
+            "level": row[3],
+            "active_title": row[4],
+            "active_badge": row[5],
+            "active_weapon": row[6],
+            "active_armor": row[7],
+            "elo": row[8],
+            "wins": row[9],
+            "losses": row[10],
+        })
+
+    cursor.execute(
+        "SELECT user_id, item_id, item_name, item_type, icon, purchased_at FROM inventory"
+    )
+    inventory = []
+    for row in cursor.fetchall():
+        inventory.append({
+            "user_id": row[0],
+            "item_id": row[1],
+            "item_name": row[2],
+            "item_type": row[3],
+            "icon": row[4],
+            "purchased_at": row[5],
+        })
+    conn.close()
+    return {
+        "version": 1,
+        "updated_at": int(time.time()),
+        "users": users,
+        "inventory": inventory,
+    }
+
+def _import_db_snapshot(snapshot):
+    if not isinstance(snapshot, dict):
+        return 0
+    users = snapshot.get("users", [])
+    inventory = snapshot.get("inventory", [])
+    if not users and not inventory:
+        return 0
+
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    for u in users:
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO users
+            (user_id, cash, xp, level, active_title, active_badge, active_weapon, active_armor, elo, wins, losses)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                u["user_id"],
+                u.get("cash", 1000000),
+                u.get("xp", 0),
+                u.get("level", 1),
+                u.get("active_title"),
+                u.get("active_badge"),
+                u.get("active_weapon"),
+                u.get("active_armor"),
+                u.get("elo", 1000),
+                u.get("wins", 0),
+                u.get("losses", 0),
+            ),
+        )
+    for inv in inventory:
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO inventory
+            (user_id, item_id, item_name, item_type, icon, purchased_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                inv["user_id"],
+                inv["item_id"],
+                inv["item_name"],
+                inv["item_type"],
+                inv["icon"],
+                inv.get("purchased_at"),
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return len(users)
+
+def _ensure_backup_branch():
+    ref_url = f"https://api.github.com/repos/{GITHUB_BACKUP_REPO}/git/ref/heads/{GITHUB_BACKUP_BRANCH}"
+    try:
+        _github_api_request(ref_url)
+        return True
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+    # Create branch from main (or repo default branch)
+    repo_info = _github_api_request(f"https://api.github.com/repos/{GITHUB_BACKUP_REPO}")
+    default_branch = repo_info.get("default_branch", "main")
+    main_ref = _github_api_request(f"https://api.github.com/repos/{GITHUB_BACKUP_REPO}/git/ref/heads/{default_branch}")
+    base_sha = main_ref["object"]["sha"]
+    _github_api_request(
+        f"https://api.github.com/repos/{GITHUB_BACKUP_REPO}/git/refs",
+        method="POST",
+        payload={"ref": f"refs/heads/{GITHUB_BACKUP_BRANCH}", "sha": base_sha},
+    )
+    return True
+
+def _find_or_detect_backup_gist():
+    global _cached_gist_id
+    if _cached_gist_id:
+        return _cached_gist_id
+    gists = _github_api_request("https://api.github.com/gists?per_page=100")
+    for g in gists:
+        if g.get("description") == "OwO Bot Cloud Database Backup" or GITHUB_BACKUP_FILE in g.get("files", {}):
+            _cached_gist_id = g["id"]
+            return _cached_gist_id
+    return None
+
+def restore_db_from_cloud():
+    global _backup_mode, _cached_gist_id, _last_cloud_sync_status
+    if not GITHUB_BACKUP_TOKEN:
+        print("Cloud backup disabled: GITHUB_TOKEN not set. Using local SQLite only.")
+        return
+
+    with _cloud_sync_lock:
+        snapshot = None
+        # 1. Try Gist first if GITHUB_GIST_ID is explicitly provided
+        if _cached_gist_id:
+            try:
+                gist = _github_api_request(f"https://api.github.com/gists/{_cached_gist_id}")
+                file_obj = gist.get("files", {}).get(GITHUB_BACKUP_FILE)
+                if file_obj and file_obj.get("content"):
+                    snapshot = json.loads(file_obj["content"])
+                    _backup_mode = "gist"
+            except Exception as e:
+                print(f"Gist restore check failed: {e}")
+
+        # 2. Try dedicated db-backup branch in repo (works with standard 'repo' token scope)
+        if snapshot is None:
+            try:
+                url = f"https://api.github.com/repos/{GITHUB_BACKUP_REPO}/contents/{GITHUB_BACKUP_FILE}?ref={GITHUB_BACKUP_BRANCH}"
+                data = _github_api_request(url)
+                if data.get("content"):
+                    raw_json = base64.b64decode(data["content"]).decode("utf-8")
+                    snapshot = json.loads(raw_json)
+                    _backup_mode = "repo"
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    _backup_mode = "repo"
+                else:
+                    print(f"Repo backup restore HTTP error: {e.code}")
+            except Exception as e:
+                print(f"Repo backup restore failed: {e}")
+
+        if snapshot and (snapshot.get("users") or snapshot.get("inventory")):
+            restored_count = _import_db_snapshot(snapshot)
+            _last_cloud_sync_status = f"Cloud Synced ({restored_count} players restored)"
+            print(f"Restored {restored_count} player(s) from cloud backup ({_backup_mode})!")
+        else:
+            # If cloud has no backup yet, check if local DB already has players and seed cloud
+            local_snap = _export_db_snapshot()
+            if local_snap["users"]:
+                _last_cloud_sync_status = "Cloud Backup Initializing..."
+                print(f"No cloud backup found yet — seeding {len(local_snap['users'])} local player(s) to cloud...")
+                # Run seed outside lock after returning
+                threading.Thread(target=sync_db_to_cloud_now, daemon=True).start()
+            else:
+                _last_cloud_sync_status = "Cloud Sync Ready (0 players yet)"
+
+def sync_db_to_cloud_now():
+    global _db_dirty, _backup_mode, _cached_gist_id, _last_cloud_sync_status
+    if not GITHUB_BACKUP_TOKEN:
+        return False
+
+    with _cloud_sync_lock:
+        try:
+            snapshot = _export_db_snapshot()
+            content_str = json.dumps(snapshot, indent=2)
+
+            if _backup_mode == "gist" or _cached_gist_id:
+                try:
+                    gid = _find_or_detect_backup_gist()
+                    payload = {
+                        "description": "OwO Bot Cloud Database Backup",
+                        "public": False,
+                        "files": {GITHUB_BACKUP_FILE: {"content": content_str}},
+                    }
+                    if gid:
+                        _github_api_request(f"https://api.github.com/gists/{gid}", method="PATCH", payload=payload)
+                    else:
+                        created = _github_api_request("https://api.github.com/gists", method="POST", payload=payload)
+                        _cached_gist_id = created.get("id")
+                    _backup_mode = "gist"
+                    _db_dirty = False
+                    _last_cloud_sync_status = f"Cloud Gist Synced ({len(snapshot['users'])} players)"
+                    return True
+                except urllib.error.HTTPError as e:
+                    if e.code in (403, 404):
+                        _backup_mode = "repo"
+                    else:
+                        raise
+
+            # Default: save to dedicated db-backup branch (never triggers Render main auto-deploy)
+            _ensure_backup_branch()
+            contents_url = f"https://api.github.com/repos/{GITHUB_BACKUP_REPO}/contents/{GITHUB_BACKUP_FILE}"
+            b64_content = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+            for attempt in range(2):
+                sha = None
+                try:
+                    existing = _github_api_request(f"{contents_url}?ref={GITHUB_BACKUP_BRANCH}")
+                    sha = existing.get("sha")
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        raise
+
+                payload = {
+                    "message": f"Auto-backup OwO Bot DB ({len(snapshot['users'])} users)",
+                    "content": b64_content,
+                    "branch": GITHUB_BACKUP_BRANCH,
+                }
+                if sha:
+                    payload["sha"] = sha
+
+                try:
+                    _github_api_request(contents_url, method="PUT", payload=payload)
+                    _backup_mode = "repo"
+                    _db_dirty = False
+                    _last_cloud_sync_status = f"Cloud Synced ({len(snapshot['users'])} players)"
+                    return True
+                except urllib.error.HTTPError as e:
+                    if e.code == 409 and attempt == 0:
+                        continue
+                    raise
+        except Exception as e:
+            _last_cloud_sync_status = f"Cloud Sync Error: {e}"
+            print(f"Cloud DB sync failed: {e}")
+            return False
+
+def _run_scheduled_sync():
+    global _sync_timer
+    with _timer_lock:
+        _sync_timer = None
+    if _db_dirty:
+        sync_db_to_cloud_now()
+
+def schedule_cloud_backup():
+    global _db_dirty, _sync_timer
+    _db_dirty = True
+    if not GITHUB_BACKUP_TOKEN:
+        return
+    with _timer_lock:
+        if _sync_timer is None or not _sync_timer.is_alive():
+            _sync_timer = threading.Timer(4.0, _run_scheduled_sync)
+            _sync_timer.daemon = True
+            _sync_timer.start()
+
+def flush_cloud_backup(signum=None, frame=None):
+    with _timer_lock:
+        global _sync_timer
+        if _sync_timer is not None:
+            _sync_timer.cancel()
+            _sync_timer = None
+    if _db_dirty and GITHUB_BACKUP_TOKEN:
+        print("Saving latest player cash & inventory to cloud before shutdown...")
+        sync_db_to_cloud_now()
+    if signum is not None:
+        sys.exit(0)
+
+atexit.register(flush_cloud_backup)
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_sig, flush_cloud_backup)
+    except Exception:
+        pass
+
+def save_and_close_db(conn, sync=True):
+    conn.commit()
+    conn.close()
+    if sync:
+        schedule_cloud_backup()
+
+def init_db():
+    global _cloud_restored
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -89,16 +422,19 @@ def init_db():
     conn.commit()
     conn.close()
 
+    if not _cloud_restored:
+        _cloud_restored = True
+        restore_db_from_cloud()
+
 def get_user(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT cash, xp, level, active_title, active_badge, active_weapon, active_armor, elo, wins, losses FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     if not row:
         # Initial cash: 1,000,000 (1 Million) cash, Elo: 1000
         cursor.execute("INSERT INTO users (user_id, cash, xp, level, active_title, active_badge, active_weapon, active_armor, elo, wins, losses) VALUES (?, 1000000, 0, 1, NULL, NULL, NULL, NULL, 1000, 0, 0)", (user_id,))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         return {"cash": 1000000, "xp": 0, "level": 1, "active_title": None, "active_badge": None, "active_weapon": None, "active_armor": None, "elo": 1000, "wins": 0, "losses": 0, "auto_refilled": False}
     
     cash, xp, level, active_title, active_badge, active_weapon, active_armor, elo, wins, losses = row
@@ -109,9 +445,10 @@ def get_user(user_id):
         cash = 100000
         auto_refilled = True
         cursor.execute("UPDATE users SET cash = ? WHERE user_id = ?", (cash, user_id))
-        conn.commit()
+        save_and_close_db(conn)
+    else:
+        conn.close()
 
-    conn.close()
     return {
         "cash": cash,
         "xp": xp,
@@ -127,9 +464,9 @@ def get_user(user_id):
     }
 
 def update_user_stats(user_id, elo_change=0, is_win=None):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
     get_user(user_id)
+    conn = get_db_conn()
+    cursor = conn.cursor()
     cursor.execute("SELECT elo, wins, losses FROM users WHERE user_id = ?", (user_id,))
     elo, wins, losses = cursor.fetchone()
     elo = (elo or 1000) + elo_change
@@ -140,8 +477,7 @@ def update_user_stats(user_id, elo_change=0, is_win=None):
     elif is_win is False:
         losses = (losses or 0) + 1
     cursor.execute("UPDATE users SET elo = ?, wins = ?, losses = ? WHERE user_id = ?", (elo, wins, losses, user_id))
-    conn.commit()
-    conn.close()
+    save_and_close_db(conn)
     return elo, wins, losses
 
 def get_tier_info(elo):
@@ -199,11 +535,11 @@ def parse_bet_amount(user_id, val):
         return None
 
 def update_user_balance(user_id, cash_change, xp_change=0):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
     # Ensure user exists
     get_user(user_id)
+
+    conn = get_db_conn()
+    cursor = conn.cursor()
     
     cursor.execute("SELECT cash, xp, level FROM users WHERE user_id = ?", (user_id,))
     cash, xp, level = cursor.fetchone()
@@ -234,8 +570,7 @@ def update_user_balance(user_id, cash_change, xp_change=0):
         auto_refilled = True
 
     cursor.execute("UPDATE users SET cash = ?, xp = ?, level = ? WHERE user_id = ?", (new_cash, new_xp, level, user_id))
-    conn.commit()
-    conn.close()
+    save_and_close_db(conn)
     
     return {
         "cash": new_cash,
@@ -1244,7 +1579,7 @@ import datetime
 
 @bot.command(name="ping", aliases=["status", "online"])
 async def owo_ping(ctx):
-    """Bot ka status aur latency check karo"""
+    """Bot ka status, latency aur cloud save status check karo"""
     latency = round(bot.latency * 1000)
     emoji = "🟢" if latency < 100 else ("🟡" if latency < 200 else "🔴")
     embed = discord.Embed(
@@ -1254,8 +1589,20 @@ async def owo_ping(ctx):
     embed.add_field(name="📡 Bot Status", value="🟢 **Online & Ready!**", inline=True)
     embed.add_field(name="⚡ Latency", value=f"{emoji} **{latency}ms**", inline=True)
     embed.add_field(name="🤖 Bot Name", value=f"**{bot.user.name}**", inline=True)
-    embed.set_footer(text="OwO Bot chal raha hai! Khelo aur OwO kamao! 🎮")
+    embed.add_field(name="💾 Cash Persistence", value=f"**{_last_cloud_sync_status}**", inline=False)
+    embed.set_footer(text="OwO Bot chal raha hai! Manual cloud save ke liye: owo backup")
     await ctx.send(embed=embed)
+
+@bot.command(name="backup", aliases=["syncdb", "savedb", "dbstatus"])
+async def owo_backup(ctx):
+    """Player cash aur inventory ko turant cloud mein save karein"""
+    if not GITHUB_BACKUP_TOKEN:
+        return await ctx.send("⚠️ Cloud Backup abhi configure nahi hai (Render Environment Variables mein `GITHUB_TOKEN` add karein). Local SQLite file active hai.")
+    ok = await bot.loop.run_in_executor(None, sync_db_to_cloud_now)
+    if ok:
+        await ctx.send(f"✅ **Backup Successful!** Saare players ka cash, level aur inventory safe cloud mein save ho gaya (`{_last_cloud_sync_status}`). Bot offline hone par bhi data safe rahega!")
+    else:
+        await ctx.send(f"❌ Backup error: `{_last_cloud_sync_status}`")
 
 @bot.command(name="games", aliases=["gamelist", "gl", "game"])
 async def owo_games(ctx):
@@ -1789,22 +2136,23 @@ class StoreSelect(discord.ui.Select):
         item_id = self.values[0]
         item = STORE_ITEMS[item_id]
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_conn()
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM inventory WHERE user_id = ? AND item_id = ?", (interaction.user.id, item_id))
         already_owned = cursor.fetchone()
+        conn.close()
 
         if already_owned:
-            conn.close()
             return await interaction.response.send_message(f"❌ Aapke paas **{item['icon']} {item['name']}** pehle se hi inventory mein hai!", ephemeral=True)
 
         user_data = get_user(interaction.user.id)
         if user_data["cash"] < item["price"]:
-            conn.close()
             return await interaction.response.send_message(f"❌ Aapke paas itna OwO Cash nahi hai! Price: **{item['price']:,} OwO** | Aapke paas: **{user_data['cash']:,} OwO**", ephemeral=True)
 
         # Deduct cash & insert inventory
         res = update_user_balance(interaction.user.id, -item["price"])
+        conn = get_db_conn()
+        cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO inventory (user_id, item_id, item_name, item_type, icon) VALUES (?, ?, ?, ?, ?)",
             (interaction.user.id, item_id, item["name"], item["type"], item["icon"])
@@ -1820,8 +2168,7 @@ class StoreSelect(discord.ui.Select):
         elif item["type"] == "armor" and not user_data.get("active_armor"):
             cursor.execute("UPDATE users SET active_armor = ? WHERE user_id = ?", (item_id, interaction.user.id))
 
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
 
         embed = discord.Embed(
             title="🛍️ Purchase Successful!",
@@ -1896,19 +2243,21 @@ async def owo_buy(ctx, item_id: str = None):
         return await ctx.send(f"❌ `{item_id}` naam ka koi item store mein nahi hai! `owo store` check karein.")
 
     item = STORE_ITEMS[item_id]
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM inventory WHERE user_id = ? AND item_id = ?", (ctx.author.id, item_id))
-    if cursor.fetchone():
-        conn.close()
+    owned = cursor.fetchone()
+    conn.close()
+    if owned:
         return await ctx.send(f"❌ Aapke paas **{item['icon']} {item['name']}** pehle se hi hai! `owo inv` se dekhein.")
 
     user_data = get_user(ctx.author.id)
     if user_data["cash"] < item["price"]:
-        conn.close()
         return await ctx.send(f"❌ Aapke paas paryapt cash nahi hai! Price: **{item['price']:,} OwO** | Balance: **{user_data['cash']:,} OwO**")
 
     res = update_user_balance(ctx.author.id, -item["price"])
+    conn = get_db_conn()
+    cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO inventory (user_id, item_id, item_name, item_type, icon) VALUES (?, ?, ?, ?, ?)",
         (ctx.author.id, item_id, item["name"], item["type"], item["icon"])
@@ -1923,8 +2272,7 @@ async def owo_buy(ctx, item_id: str = None):
     elif item["type"] == "armor" and not user_data.get("active_armor"):
         cursor.execute("UPDATE users SET active_armor = ? WHERE user_id = ?", (item_id, ctx.author.id))
 
-    conn.commit()
-    conn.close()
+    save_and_close_db(conn)
 
     embed = discord.Embed(
         title="🛍️ Item Purchased!",
@@ -2021,7 +2369,7 @@ async def owo_equip(ctx, item_id: str = None):
         return await ctx.send("❓ **Usage:** `owo equip <item_id>`\nApni items dekhne ke liye `owo inv` check karein!")
 
     item_id = item_id.lower()
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT item_name, item_type, icon FROM inventory WHERE user_id = ? AND item_id = ?", (ctx.author.id, item_id))
     row = cursor.fetchone()
@@ -2035,24 +2383,20 @@ async def owo_equip(ctx, item_id: str = None):
 
     if itype == "title":
         cursor.execute("UPDATE users SET active_title = ? WHERE user_id = ?", (full_str, ctx.author.id))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         await ctx.send(f"✅ Aapne **{full_str}** title successfully equip kar liya! Ab yeh `owo profile` par dikhega.")
     elif itype == "badge":
         cursor.execute("UPDATE users SET active_badge = ? WHERE user_id = ?", (full_str, ctx.author.id))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         await ctx.send(f"✅ Aapne **{full_str}** badge successfully equip kar liya! Ab yeh `owo profile` par dikhega.")
     elif itype == "weapon":
         cursor.execute("UPDATE users SET active_weapon = ? WHERE user_id = ?", (item_id, ctx.author.id))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         bonus = STORE_ITEMS.get(item_id, {}).get("bonus_dmg", 0)
         await ctx.send(f"🗡️ Aapne **{full_str}** (+{bonus} DMG) equip kar liya! Dragon raids mein aapka attack significantly boost hoga! 🔥")
     elif itype == "armor":
         cursor.execute("UPDATE users SET active_armor = ? WHERE user_id = ?", (item_id, ctx.author.id))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         reduct = STORE_ITEMS.get(item_id, {}).get("dmg_reduction", 0)
         await ctx.send(f"🛡️ Aapne **{full_str}** (-{reduct}% DMG Reduction) equip kar liya! Dragon boss ka attack aapko kam damage dega! 🛡️")
     else:
@@ -2066,28 +2410,24 @@ async def owo_unequip(ctx, target_type: str = None):
         return await ctx.send("❓ **Usage:** `owo unequip weapon` / `owo unequip armor` / `owo unequip title` / `owo unequip badge`")
 
     target_type = target_type.lower()
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_conn()
     cursor = conn.cursor()
 
     if target_type == "title":
         cursor.execute("UPDATE users SET active_title = NULL WHERE user_id = ?", (ctx.author.id,))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         await ctx.send("✅ Title unequip kar diya gaya hai! Default level title wapas active ho gaya.")
     elif target_type == "weapon":
         cursor.execute("UPDATE users SET active_weapon = NULL WHERE user_id = ?", (ctx.author.id,))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         await ctx.send("✅ Weapon unequip kar diya gaya hai! Default dagger active ho gaya.")
     elif target_type == "armor":
         cursor.execute("UPDATE users SET active_armor = NULL WHERE user_id = ?", (ctx.author.id,))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         await ctx.send("✅ Armor unequip kar diya gaya hai! Default clothes active ho gaye.")
     else:
         cursor.execute("UPDATE users SET active_badge = NULL WHERE user_id = ?", (ctx.author.id,))
-        conn.commit()
-        conn.close()
+        save_and_close_db(conn)
         await ctx.send("✅ Badge unequip kar diya gaya hai!")
 
 # ----------------- 1v1, DUO & SQUAD COMPETITIVE GAMES -----------------
@@ -3004,4 +3344,8 @@ if __name__ == "__main__":
     if not TOKEN or TOKEN == "YOUR_DISCORD_BOT_TOKEN_HERE":
         print("ERROR: Kripya .env file me apna DISCORD_TOKEN daalein!")
     else:
-        bot.run(TOKEN)
+        init_db()
+        try:
+            bot.run(TOKEN)
+        finally:
+            flush_cloud_backup()
