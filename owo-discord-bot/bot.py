@@ -560,21 +560,22 @@ async def owo_coinflip(ctx, choice: str = None, bet: str = None):
     msg = await ctx.send(embed=flip_embed)
 
     frames = [
-        ("🪙 [ HEADS ]", "🟡 Coin ghoom raha hai..."),
-        ("💿 [ TAILS ]", "⚪ Coin flip ho raha hai..."),
-        ("🪙 [ HEADS ]", "🟡 Dheere dheere neeche aa raha hai..."),
+        ("🪙 [ HEADS ]", "🟡 Coin hawa mein ghoom raha hai..."),
         ("💿 [ TAILS ]", "⚪ Zameen par girne wala hai..."),
     ]
     for face, text in frames:
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(1.2)
         anim_embed = discord.Embed(
             title="🪙 Flipping Coin...",
             description=f"Aapne chuna: **{choice_str.upper()}** | Bet: **{bet_amount:,} OwO**\n\n```\n   {face}   \n```\n*{text}*",
             color=discord.Color.gold()
         )
-        await msg.edit(embed=anim_embed)
+        try:
+            await msg.edit(embed=anim_embed)
+        except Exception:
+            pass
 
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(1.0)
 
     # Flip coin
     outcome = random.choice(["heads", "tails"])
@@ -673,23 +674,24 @@ async def owo_roulette(ctx, bet_type: str = None, bet: str = None):
     )
     msg = await ctx.send(embed=init_embed)
 
-    # Roulette animation frames
+    # Roulette animation frames (spaced to avoid rate limit)
     r_frames = [
         "  [ ⚫ 26 ] [ 🔴 3 ] [ ⚫ 35 ] [ 🔴 12 ] [ ⚫ 28 ]  \n             ▲ Ball Spinning Fast! ▲          ",
-        "  [ 🔴 7  ] [ ⚫ 29 ] [ 🟢 0  ] [ ⚫ 2  ] [ 🔴 14 ]  \n             ▲ Ball Bouncing... ▲            ",
-        "  [ ⚫ 15 ] [ 🔴 19 ] [ ⚫ 4  ] [ 🔴 21 ] [ ⚫ 2  ]  \n             ▲ Dheere dheere ruk rahi hai... ▲",
-        "  [ 🔴 32 ] [ ⚫ 20 ] [ 🔴 1  ] [ ⚫ 33 ] [ 🔴 16 ]  \n             ▲ Almost there... ▲             ",
+        "  [ 🔴 32 ] [ ⚫ 20 ] [ 🔴 1  ] [ ⚫ 33 ] [ 🔴 16 ]  \n             ▲ Dheere dheere ruk rahi hai... ▲",
     ]
     for frame in r_frames:
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(1.2)
         anim_embed = discord.Embed(
             title="🎡 Roulette Wheel Spinning... 💨",
             description=f"Aapki Bet: **{bet_type.upper()}** | Amount: **{bet_amount:,} OwO**\n\n```\n{frame}\n```",
             color=discord.Color.gold()
         )
-        await msg.edit(embed=anim_embed)
+        try:
+            await msg.edit(embed=anim_embed)
+        except Exception:
+            pass
 
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(1.0)
 
     # Roulette logic (European 0-36)
     rolled_num = random.randint(0, 36)
@@ -791,18 +793,21 @@ async def owo_slots(ctx, bet: str = "100"):
 
     symbols = ["🍒", "🍋", "🍇", "🔔", "⭐", "💎", "7️⃣"]
 
-    # Reel animation loop
-    for i in range(4):
-        await asyncio.sleep(0.35)
+    # Reel animation loop (spaced to prevent rate limits)
+    for i in range(2):
+        await asyncio.sleep(1.2)
         r1, r2, r3 = random.choice(symbols), random.choice(symbols), random.choice(symbols)
         anim_embed = discord.Embed(
             title="🎰 Slot Machine Spinning... 💨",
             description=f"Player: {ctx.author.mention} | Bet: **{bet_amount:,} OwO**\n\n```\n   [ {r1} | {r2} | {r3} ]   \n   Spinning Reels...   \n```",
             color=discord.Color.gold()
         )
-        await msg.edit(embed=anim_embed)
+        try:
+            await msg.edit(embed=anim_embed)
+        except Exception:
+            pass
 
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(1.0)
 
     # Final symbols
     s1, s2, s3 = random.choice(symbols), random.choice(symbols), random.choice(symbols)
@@ -1065,74 +1070,42 @@ class SpinButton(discord.ui.Button):
             return f"```\n{line0}\n{line1}\n{line2}\n{line3}\n{line4}\n{line5}\n{line6}\n```"
 
         # ─────────────────────────────────────────
-        # PHASE 1: Fast spinning (random positions)
+        # PHASE 1: Fast spinning (safe from rate limits)
         # ─────────────────────────────────────────
-        fast_frames = 10
-        fast_delay = 0.18
-        pos = random.randint(0, total_segments - 1)
-
-        for i in range(fast_frames):
-            pos = (pos + 3) % total_segments
-            wheel_art = build_wheel(pos)
-            embed = discord.Embed(
-                title="🎡 Spin & Win — Spinning Fast! 💨",
-                description=f"{wheel_art}\n**Bet:** {self.bet:,} OwO | 🔄 Spinning...",
-                color=discord.Color.yellow()
-            )
-            embed.set_footer(text="▶▶ Wheel spinning fast... ◀◀")
+        pos = (win_idx - 3) % total_segments
+        wheel_art = build_wheel(pos)
+        embed = discord.Embed(
+            title="🎡 Spin & Win — Spinning Fast! 💨",
+            description=f"{wheel_art}\n**Bet:** {self.bet:,} OwO | 🔄 Spinning fast...",
+            color=discord.Color.yellow()
+        )
+        embed.set_footer(text="▶▶ Wheel ghoom rahi hai... ◀◀")
+        try:
             await interaction.edit_original_response(content=None, embed=embed, view=None)
-            await asyncio.sleep(fast_delay)
+        except Exception:
+            pass
+        await asyncio.sleep(1.2)
 
         # ─────────────────────────────────────────
-        # PHASE 2: Slowing down (approach winner)
+        # PHASE 2: Slowing down
         # ─────────────────────────────────────────
-        # Calculate how many steps to reach win_idx from current pos (going forward)
-        steps_needed = (win_idx - pos) % total_segments
-        if steps_needed == 0:
-            steps_needed = total_segments
-
-        # Add some extra full rotations for effect
-        extra_laps = total_segments * 1  # 1 extra full lap
-        total_slow_steps = extra_laps + steps_needed
-
-        slow_delays = []
-        for i in range(total_slow_steps):
-            # Gradually increase delay from 0.22 → 0.65
-            progress = i / total_slow_steps
-            delay = 0.22 + (0.43 * progress)
-            slow_delays.append(delay)
-
-        for i, delay in enumerate(slow_delays):
-            pos = (pos + 1) % total_segments
-            steps_left = total_slow_steps - i
-
-            if steps_left <= 4:
-                title = "🎡 Almost there... 🤞"
-                color = discord.Color.orange()
-                footer = f"⏳ {steps_left} step(s) bachi hai..."
-            elif steps_left <= 8:
-                title = "🎡 Slowing down... 🐢"
-                color = discord.Color.orange()
-                footer = "🐢 Wheel dheemi ho rahi hai..."
-            else:
-                title = "🎡 Spin & Win — 💨"
-                color = discord.Color.yellow()
-                footer = "▶▶ Wheel spinning... ◀◀"
-
-            wheel_art = build_wheel(pos)
-            embed = discord.Embed(
-                title=title,
-                description=f"{wheel_art}\n**Bet:** {self.bet:,} OwO",
-                color=color
-            )
-            embed.set_footer(text=footer)
+        pos = (win_idx - 1) % total_segments
+        wheel_art = build_wheel(pos)
+        embed = discord.Embed(
+            title="🎡 Almost there... 🤞",
+            description=f"{wheel_art}\n**Bet:** {self.bet:,} OwO | 🐢 Slowing down...",
+            color=discord.Color.orange()
+        )
+        embed.set_footer(text="⏳ Almost stopping...")
+        try:
             await interaction.edit_original_response(content=None, embed=embed, view=None)
-            await asyncio.sleep(delay)
+        except Exception:
+            pass
+        await asyncio.sleep(1.2)
 
         # ─────────────────────────────────────────
         # PHASE 3: Final STOP — show result
         # ─────────────────────────────────────────
-        # 1 dramatic pause on winning slot
         wheel_art = build_wheel(win_idx)
         embed = discord.Embed(
             title="🛑 Wheel Ruk Gayi!",
@@ -1140,8 +1113,11 @@ class SpinButton(discord.ui.Button):
             color=discord.Color.blurple()
         )
         embed.set_footer(text="✨ Result aa raha hai...")
-        await interaction.edit_original_response(content=None, embed=embed, view=None)
-        await asyncio.sleep(1.2)
+        try:
+            await interaction.edit_original_response(content=None, embed=embed, view=None)
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
 
         # ─────────────────────────────────────────
         # PHASE 4: Show result embed
