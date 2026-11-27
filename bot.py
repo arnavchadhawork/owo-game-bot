@@ -1,4 +1,5 @@
 import os
+import io
 import sys
 import json
 import time
@@ -16,6 +17,12 @@ from dotenv import load_dotenv
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -1338,6 +1345,185 @@ def spin_wheel():
         population.extend([seg] * seg[2])
     return random.choice(population)
 
+# Ordered 12 slices around the circular prize wheel (clockwise from top 12 o'clock)
+WHEEL_VISUAL_SLICES = [
+    # (match_key, display_text, bg_color, fg_color)
+    ("BANKRUPT", "BANKRUPT", "#2B2D31", "#FFFFFF"),
+    ("2x",       "2x",       "#10B981", "#FFFFFF"),
+    ("50 OwO",   "50 OwO",   "#D97706", "#FFFFFF"),
+    ("5x",       "5x",       "#2563EB", "#FFFFFF"),
+    ("3x",       "3x",       "#0D9488", "#FFFFFF"),
+    ("500x",     "500x",     "#DB2777", "#FFFFFF"),
+    ("10x",      "10x",      "#7C3AED", "#FFFFFF"),
+    ("BANKRUPT", "BANKRUPT", "#991B1B", "#FFFFFF"),
+    ("20x",      "20x",      "#4F46E5", "#FFFFFF"),
+    ("50x",      "50x",      "#EA580C", "#FFFFFF"),
+    ("100x",     "100x",     "#0891B2", "#FFFFFF"),
+    ("JACKPOT",  "JACKPOT!", "#FACC15", "#111827"),
+]
+
+_CACHED_WHEEL_BASE = None
+_WHEEL_LOCK = threading.Lock()
+
+def _get_pil_font(size):
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+def _get_cached_wheel_base(disp_size=340):
+    global _CACHED_WHEEL_BASE
+    if _CACHED_WHEEL_BASE is not None:
+        return _CACHED_WHEEL_BASE
+
+    with _WHEEL_LOCK:
+        if _CACHED_WHEEL_BASE is not None:
+            return _CACHED_WHEEL_BASE
+
+        hi = disp_size * 2
+        img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        cx = cy = hi // 2
+        outer_r = hi // 2 - 14
+        n = len(WHEEL_VISUAL_SLICES)
+        slice_deg = 360.0 / n
+
+        # Metallic gold outer rim + dark inner border
+        draw.ellipse((cx - outer_r - 12, cy - outer_r - 12, cx + outer_r + 12, cy + outer_r + 12), fill="#F59E0B", outline="#78350F", width=4)
+        draw.ellipse((cx - outer_r - 3, cy - outer_r - 3, cx + outer_r + 3, cy + outer_r + 3), fill="#111827")
+
+        font = _get_pil_font(26)
+        for i, (_, text, bg_color, fg_color) in enumerate(WHEEL_VISUAL_SLICES):
+            center_deg = 270.0 + i * slice_deg
+            draw.pieslice(
+                (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
+                start=center_deg - slice_deg / 2.0,
+                end=center_deg + slice_deg / 2.0,
+                fill=bg_color,
+                outline="#FFFFFF",
+                width=4
+            )
+
+        for i, (_, text, bg_color, fg_color) in enumerate(WHEEL_VISUAL_SLICES):
+            label_img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
+            ldraw = ImageDraw.Draw(label_img)
+            bbox = ldraw.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            tx = cx + outer_r * 0.62 - tw / 2.0
+            ty = cy - th / 2.0 - bbox[1]
+            if fg_color == "#FFFFFF":
+                ldraw.text((tx + 2, ty + 2), text, font=font, fill=(0, 0, 0, 170))
+            ldraw.text((tx, ty), text, font=font, fill=fg_color)
+            rotated_label = label_img.rotate(90.0 - i * slice_deg, resample=Image.BICUBIC)
+            img = Image.alpha_composite(img, rotated_label)
+
+        draw = ImageDraw.Draw(img)
+        peg_r = 7
+        peg_ring = outer_r + 5
+        for i in range(n):
+            ang_rad = math.radians(270.0 + i * slice_deg - slice_deg / 2.0)
+            px = cx + peg_ring * math.cos(ang_rad)
+            py = cy + peg_ring * math.sin(ang_rad)
+            draw.ellipse((px - peg_r, py - peg_r, px + peg_r, py + peg_r), fill="#FEF08A", outline="#92400E", width=2)
+
+        _CACHED_WHEEL_BASE = img.resize((disp_size, disp_size), Image.LANCZOS)
+        return _CACHED_WHEEL_BASE
+
+def _compose_wheel_frame(base_disp, angle_cw, stopped=False):
+    w, h = 380, 396
+    bg = Image.new("RGBA", (w, h), (30, 31, 34, 255))
+    rotated = base_disp.rotate(-angle_cw, resample=Image.BICUBIC)
+    wx = (w - 340) // 2
+    wy = 42
+    bg.paste(rotated, (wx, wy), rotated)
+
+    draw = ImageDraw.Draw(bg)
+    cx = w // 2
+    cy = wy + 170
+
+    # Center stationary hub
+    hub_r = 32
+    draw.ellipse((cx - hub_r - 4, cy - hub_r - 4, cx + hub_r + 4, cy + hub_r + 4), fill="#F59E0B", outline="#111827", width=3)
+    draw.ellipse((cx - hub_r, cy - hub_r, cx + hub_r, cy + hub_r), fill="#1E1F22")
+    hub_font = _get_pil_font(17)
+    hb = draw.textbbox((0, 0), "OwO", font=hub_font)
+    draw.text((cx - (hb[2] - hb[0]) / 2, cy - (hb[3] - hb[1]) / 2 - hb[1]), "OwO", font=hub_font, fill="#FACC15")
+
+    # Top stationary pointer arrow at 12 o'clock (wobbles slightly while pegs pass during spin)
+    tip_y = wy + 16
+    top_y = wy - 28
+    wobble = 0 if stopped else math.sin(math.radians(angle_cw * 6)) * 4
+    arrow_pts = [(cx - 17 + wobble, top_y), (cx + 17 + wobble, top_y), (cx, tip_y)]
+    draw.polygon(arrow_pts, fill="#EF4444", outline="#FFFFFF")
+    draw.ellipse((cx - 9, top_y - 5, cx + 9, top_y + 9), fill="#F59E0B", outline="#FFFFFF", width=2)
+
+    return bg.convert("RGB")
+
+def generate_wheel_preview_png():
+    """Returns bytes of a static circular wheel PNG for initial prompt."""
+    if not PIL_AVAILABLE:
+        return None
+    base = _get_cached_wheel_base()
+    img = _compose_wheel_frame(base, 0.0, stopped=True)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+def generate_spin_wheel_assets(win_idx):
+    """Generates animated spinning circular wheel GIF + stopped result PNG bytes."""
+    base = _get_cached_wheel_base()
+    slice_deg = 360.0 / len(WHEEL_VISUAL_SLICES)
+    # Small random jitter inside winning slice so it feels authentic
+    target_offset = (360.0 - win_idx * slice_deg + random.uniform(-6.0, 6.0)) % 360.0
+    total_spin_deg = 360.0 * 3 + target_offset
+
+    num_frames = 28
+    frames = []
+    durations = []
+    final_rgb = None
+    for f in range(num_frames):
+        progress = f / (num_frames - 1)
+        eased = 1.0 - (1.0 - progress) ** 3  # smooth physics deceleration
+        angle = total_spin_deg * eased
+        is_final = (f == num_frames - 1)
+        img = _compose_wheel_frame(base, angle, stopped=is_final)
+        if is_final:
+            final_rgb = img
+        frames.append(img.quantize(colors=96, method=Image.Quantize.FASTOCTREE))
+        durations.append(3000 if is_final else 80)
+
+    gif_buf = io.BytesIO()
+    frames[0].save(
+        gif_buf,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        loop=0,
+        optimize=True,
+    )
+
+    png_buf = io.BytesIO()
+    final_rgb.save(png_buf, format="PNG")
+    return gif_buf.getvalue(), png_buf.getvalue()
+
+def build_circular_ascii_wheel(center_idx):
+    """Circular ring fallback if PIL is unavailable."""
+    n = len(WHEEL_VISUAL_SLICES)
+    s = [WHEEL_VISUAL_SLICES[(center_idx + i) % n][1][:6] for i in range(n)]
+    return (
+        "```\n"
+        f"             ▼ [{s[0]:^6}] ▼            \n"
+        f"        ({s[11]:^6})      ({s[1]:^6})      \n"
+        f"    ({s[10]:^6})    .----.    ({s[2]:^6})  \n"
+        f"   ({s[9]:^6})    | OwO  |    ({s[3]:^6}) \n"
+        f"    ({s[8]:^6})    '----'    ({s[4]:^6})  \n"
+        f"        ({s[7]:^6})      ({s[5]:^6})      \n"
+        f"             ({s[6]:^6})               \n"
+        "```"
+    )
+
 class SpinButton(discord.ui.Button):
     def __init__(self, bet):
         super().__init__(style=discord.ButtonStyle.success, label="🎡  SPIN!", emoji=None)
@@ -1349,114 +1535,68 @@ class SpinButton(discord.ui.Button):
         if interaction.user.id != view.user_id:
             return await interaction.response.send_message("❌ Yeh aapki game nahi hai!", ephemeral=True)
 
-        # Disable button to prevent double-spin
+        # Disable button immediately (<3s interaction ack)
         self.disabled = True
-        await interaction.response.edit_message(view=view)
+        await interaction.response.edit_message(content="🎡 **Charkha taiyaar ho raha hai...**", view=view)
 
-        # Pre-decide result
+        # Pre-decide weighted outcome
         segment = spin_wheel()
         label, multiplier, _, is_jackpot = segment
 
-        # ─────────────────────────────────────────
-        # WHEEL SEGMENTS displayed in order
-        # ─────────────────────────────────────────
-        wheel_segments = [
-            "💀 BANKRUPT",
-            "🎁 2x",
-            "🔸 50 OwO",
-            "🎁 5x",
-            "🎁 3x",
-            "🌟 500x",
-            "🎁 10x",
-            "💀 BANKRUPT",
-            "🎁 20x",
-            "🎁 50x",
-            "🎁 100x",
-            "🏆 JACKPOT!",
-        ]
+        if is_jackpot:
+            match_key = "JACKPOT"
+        elif label == "💀 BANKRUPT":
+            match_key = "BANKRUPT"
+        elif multiplier == 0:
+            match_key = "50 OwO"
+        else:
+            match_key = f"{multiplier}x"
 
-        # Find index of winning segment (closest match)
-        winning_label = "🏆 JACKPOT!" if is_jackpot else (
-            "💀 BANKRUPT" if label == "💀 BANKRUPT" else (
-                "🔸 50 OwO" if multiplier == 0 else f"🎁 {multiplier}x" if multiplier <= 100 else "🌟 500x"
+        matching_indices = [i for i, item in enumerate(WHEEL_VISUAL_SLICES) if item[0] == match_key]
+        win_idx = random.choice(matching_indices) if matching_indices else 0
+
+        wheel_art = ""
+        png_bytes = None
+        if PIL_AVAILABLE:
+            gif_bytes, png_bytes = await bot.loop.run_in_executor(None, generate_spin_wheel_assets, win_idx)
+            spin_embed = discord.Embed(
+                title="🎡 Spin & Win — Wheel Ghoom Rahi Hai! 💨",
+                description=f"**Player:** {interaction.user.mention} | **Bet:** **{self.bet:,} OwO Cash**\n\n🔄 *Circular Wheel full speed par spin ho rahi hai...*",
+                color=discord.Color.yellow()
             )
-        )
-        # Find index
-        win_idx = 0
-        for i, s in enumerate(wheel_segments):
-            if winning_label in s or s in winning_label:
-                win_idx = i
-                break
-
-        total_segments = len(wheel_segments)
-
-        def build_wheel(center_idx):
-            """Build a visual wheel with 5 visible slots, center is the pointer"""
-            idxs = [(center_idx + i - 2) % total_segments for i in range(5)]
-            slots = wheel_segments[idxs[0]], wheel_segments[idxs[1]], wheel_segments[idxs[2]], wheel_segments[idxs[3]], wheel_segments[idxs[4]]
-            # Center (index 2) is the pointed slot
-            line0 = "┌─────────────────────────────────┐"
-            line1 = f"│  {slots[0]:<12}                  │"
-            line2 = f"│  {slots[1]:<12}                  │"
-            line3 = f"│▶▶ {slots[2]:<12} ◀◀             │"   # <-- pointer
-            line4 = f"│  {slots[3]:<12}                  │"
-            line5 = f"│  {slots[4]:<12}                  │"
-            line6 = "└─────────────────────────────────┘"
-            return f"```\n{line0}\n{line1}\n{line2}\n{line3}\n{line4}\n{line5}\n{line6}\n```"
-
-        # ─────────────────────────────────────────
-        # PHASE 1: Fast spinning (safe from rate limits)
-        # ─────────────────────────────────────────
-        pos = (win_idx - 3) % total_segments
-        wheel_art = build_wheel(pos)
-        embed = discord.Embed(
-            title="🎡 Spin & Win — Spinning Fast! 💨",
-            description=f"{wheel_art}\n**Bet:** {self.bet:,} OwO | 🔄 Spinning fast...",
-            color=discord.Color.yellow()
-        )
-        embed.set_footer(text="▶▶ Wheel ghoom rahi hai... ◀◀")
-        try:
-            await interaction.edit_original_response(content=None, embed=embed, view=None)
-        except Exception:
-            pass
-        await asyncio.sleep(1.2)
+            spin_embed.set_image(url="attachment://wheel.gif")
+            spin_embed.set_footer(text="▶▶ Rukne ka intezaar karein... Good luck! 🍀")
+            try:
+                await interaction.edit_original_response(
+                    content=None,
+                    embed=spin_embed,
+                    attachments=[discord.File(io.BytesIO(gif_bytes), filename="wheel.gif")],
+                    view=None
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(2.7)
+        else:
+            # Circular ASCII animation fallback (safe pacing to avoid 429 rate limits)
+            for offset in [4, 2, 0]:
+                idx = (win_idx - offset) % len(WHEEL_VISUAL_SLICES)
+                wheel_art = build_circular_ascii_wheel(idx)
+                stage_title = "🎡 Wheel Spinning Fast! 💨" if offset > 0 else "🛑 Wheel Ruk Gayi!"
+                anim_embed = discord.Embed(
+                    title=stage_title,
+                    description=f"{wheel_art}\n**Bet:** {self.bet:,} OwO",
+                    color=discord.Color.yellow() if offset > 0 else discord.Color.blurple()
+                )
+                try:
+                    await interaction.edit_original_response(content=None, embed=anim_embed, view=None)
+                except Exception:
+                    pass
+                await asyncio.sleep(1.1)
 
         # ─────────────────────────────────────────
-        # PHASE 2: Slowing down
+        # Final Result Embed + Balance Update
         # ─────────────────────────────────────────
-        pos = (win_idx - 1) % total_segments
-        wheel_art = build_wheel(pos)
-        embed = discord.Embed(
-            title="🎡 Almost there... 🤞",
-            description=f"{wheel_art}\n**Bet:** {self.bet:,} OwO | 🐢 Slowing down...",
-            color=discord.Color.orange()
-        )
-        embed.set_footer(text="⏳ Almost stopping...")
-        try:
-            await interaction.edit_original_response(content=None, embed=embed, view=None)
-        except Exception:
-            pass
-        await asyncio.sleep(1.2)
-
-        # ─────────────────────────────────────────
-        # PHASE 3: Final STOP — show result
-        # ─────────────────────────────────────────
-        wheel_art = build_wheel(win_idx)
-        embed = discord.Embed(
-            title="🛑 Wheel Ruk Gayi!",
-            description=f"{wheel_art}\n**Bet:** {self.bet:,} OwO | 🎯 Calculating...",
-            color=discord.Color.blurple()
-        )
-        embed.set_footer(text="✨ Result aa raha hai...")
-        try:
-            await interaction.edit_original_response(content=None, embed=embed, view=None)
-        except Exception:
-            pass
-        await asyncio.sleep(1.0)
-
-        # ─────────────────────────────────────────
-        # PHASE 4: Show result embed
-        # ─────────────────────────────────────────
+        art_block = f"{wheel_art}\n" if not PIL_AVAILABLE else ""
         if is_jackpot:
             winnings = JACKPOT_AMOUNT
             profit = winnings - self.bet
@@ -1466,8 +1606,7 @@ class SpinButton(discord.ui.Button):
             embed = discord.Embed(
                 title="🏆🎉 JACKPOT! 1,000,000 OwO!!!",
                 description=(
-                    f"{wheel_art}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{art_block}━━━━━━━━━━━━━━━━━━━━\n"
                     f"🎊 **EK MILLION OwO CASH JEETA!** 🎊\n"
                     f"Bet: **{self.bet:,} OwO** → JACKPOT: **+{JACKPOT_AMOUNT:,} OwO**{level_msg}\n"
                     f"💰 **Naya Balance: {res['cash']:,} OwO**"
@@ -1483,8 +1622,7 @@ class SpinButton(discord.ui.Button):
             embed = discord.Embed(
                 title="💀 BANKRUPT! Ohhh Nooo!",
                 description=(
-                    f"{wheel_art}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{art_block}━━━━━━━━━━━━━━━━━━━━\n"
                     f"💀 **BANKRUPT aa gaya!**\n"
                     f"Aap **{self.bet:,} OwO Cash** haar gaye!{refill_msg}\n"
                     f"💰 **Naya Balance: {res['cash']:,} OwO**"
@@ -1501,8 +1639,7 @@ class SpinButton(discord.ui.Button):
             embed = discord.Embed(
                 title="🔸 Tiny Win!",
                 description=(
-                    f"{wheel_art}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{art_block}━━━━━━━━━━━━━━━━━━━━\n"
                     f"🔸 **50 OwO mila — thoda toh sahi!**\n"
                     f"Net: **{small_win - self.bet:+,} OwO**{refill_msg}\n"
                     f"💰 **Naya Balance: {res['cash']:,} OwO**"
@@ -1521,8 +1658,7 @@ class SpinButton(discord.ui.Button):
             embed = discord.Embed(
                 title=f"🎡 Spin & Win — {label} 🎉",
                 description=(
-                    f"{wheel_art}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{art_block}━━━━━━━━━━━━━━━━━━━━\n"
                     f"🎁 **{multiplier}x Multiplier!**\n"
                     f"Bet: {self.bet:,} OwO → Payout: **{total_payout:,} OwO** (+{profit:,}){level_msg}\n"
                     f"💰 **Naya Balance: {res['cash']:,} OwO**"
@@ -1531,7 +1667,16 @@ class SpinButton(discord.ui.Button):
             )
             embed.set_footer(text=f"🎉 {multiplier}x win! Maza aa gaya! | owo spin se dobara khao")
 
-        await interaction.edit_original_response(content=None, embed=embed, view=None)
+        if PIL_AVAILABLE and png_bytes is not None:
+            embed.set_image(url="attachment://result.png")
+            await interaction.edit_original_response(
+                content=None,
+                embed=embed,
+                attachments=[discord.File(io.BytesIO(png_bytes), filename="result.png")],
+                view=None
+            )
+        else:
+            await interaction.edit_original_response(content=None, embed=embed, view=None)
 
 class SpinView(discord.ui.View):
     def __init__(self, user_id, bet):
@@ -1551,25 +1696,29 @@ async def owo_spin(ctx, bet: str = "1000"):
     if user_data["cash"] < bet_amount:
         return await ctx.send(f"❌ Aapke paas itna OwO Cash nahi hai! Balance: **{user_data['cash']:,} OwO**")
 
-    segments_display = "\n".join(
-        f"{'🏆' if s[3] else '•'} **{s[0]}** — weight {s[2]}"
-        for s in SPIN_SEGMENTS
-    )
-
     view = SpinView(user_id=ctx.author.id, bet=bet_amount)
+    preview_ascii = "" if PIL_AVAILABLE else f"{build_circular_ascii_wheel(0)}\n"
     embed = discord.Embed(
         title="🎡 OwO Spin & Win!",
         description=(
             f"Player: {ctx.author.mention}\n"
             f"Bet: **{bet_amount:,} OwO Cash**\n\n"
+            f"{preview_ascii}"
             f"**Possible Prizes:**\n"
             f"💀 BANKRUPT | 🔸 50 OwO | 🎁 2x–100x | 🌟 500x\n"
-            f"🏆 **JACKPOT = 1,00,000 OwO!!!**\n\n"
+            f"🏆 **JACKPOT = 1,000,000 OwO!!!**\n\n"
             f"Neeche **SPIN** dabao!"
         ),
         color=discord.Color.purple()
     )
     embed.set_footer(text="Jackpot Odds: 1 in 100 | Good Luck! 🍀")
+
+    if PIL_AVAILABLE:
+        preview_bytes = await bot.loop.run_in_executor(None, generate_wheel_preview_png)
+        if preview_bytes:
+            embed.set_image(url="attachment://wheel_preview.png")
+            return await ctx.send(embed=embed, file=discord.File(io.BytesIO(preview_bytes), filename="wheel_preview.png"), view=view)
+
     await ctx.send(embed=embed, view=view)
 
 # ----------------- CHECK / INFO COMMANDS -----------------
